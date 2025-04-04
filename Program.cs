@@ -1,91 +1,136 @@
-using System.Data;
-using System.Reflection;
-
-private void HandleButtonClick(string passportTextbox)
+public class Passport
 {
-    if (ValidateInput(passportTextbox))
-        return;
+    public string Number { get; }
 
-    var processedPassport = ProcessPassportData(passportTextbox);
+    public Passport(string rawData)
+    {
+        var cleaned = rawData?.Trim().Replace(" ", "") ?? "";
 
-    if (processedPassport == null)
-    {
-        textResult.Text = "Неверный формат серии или номера паспорта";
-        return;
-    }
+        if (cleaned.Length < 10)
+            throw new ArgumentException("Неверный формат паспорта");
 
-    try
-    {
-        var result = ExecutePassportCheck(processedPassport);
-        textResult.Text = FormatResult(result, passportTextbox);
-    }
-    catch (SQLiteException exception)
-    {
-        HandleDatabaseException(exception);
+        Number = cleaned;
     }
 }
 
-private bool ValidateInput(string input)
+public interface IPassportValidator
 {
-    if (string.IsNullOrWhiteSpace(input) == false)
-        return false;
-
-    MessageBox.Show("Введите серию и номер паспорта");
-    return true;
+    bool Validate(string input);
 }
 
-private string ProcessPassportData(string passportData)
+public class PassportValidator : IPassportValidator
 {
-    var cleanedData = passportData.Trim().Replace(" ", string.Empty);
-
-    return cleanedData.Length >= 10 ? cleanedData : null;
+    public bool Validate(string input) => 
+        string.IsNullOrWhiteSpace(input) == false;
 }
 
-private DataTable ExecutePassportCheck(string passportData)
+public class PassportHashService
 {
-    using (var connection = CreateConnection())
+    public string ComputeHash(Passport passport)
     {
+        using var sha256 = SHA256.Create();
+        byte[] bytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(passport.Number));
+        return BitConverter.ToString(bytes).Replace("-", "");
+    }
+}
+
+public class PassportRepository
+{
+    private const string Hash = "@hash";
+
+    public bool CheckAccess(string hash)
+    {
+        SQLiteConnection connection = new SQLiteConnection(GetConnectionString());
+
         connection.Open();
-        var command = CreateCommand(connection, passportData);
-        return ExecuteQuery(command);
+
+        SQLiteCommand command = new SQLiteCommand($"SELECT access_granted FROM passports WHERE hash = {Hash} LIMIT 1",connection);
+
+        command.Parameters.AddWithValue(Hash, hash);
+        return Convert.ToBoolean(command.ExecuteScalar());
+    }
+
+    private string GetConnectionString() =>
+        $"Data Source={Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "db.sqlite")}";
+}
+
+public interface IPassportView
+{
+    string PassportInput { get; }
+    void ShowResult(string message);
+    void ShowError(string message);
+}
+
+public class PassportPresenter
+{
+    private readonly IPassportView _view;
+    private readonly IPassportValidator _validator;
+    private readonly PassportHashService _hashService;
+    private readonly PassportRepository _repository;
+
+    public PassportPresenter(IPassportView view, IPassportValidator validator, PassportHashService hashService, PassportRepository repository)
+    {
+        _view = view;
+        _validator = validator;
+        _hashService = hashService;
+        _repository = repository;
+    }
+
+    public void CheckPassport()
+    {
+        try
+        {
+            if (_validator.Validate(_view.PassportInput) == false)
+            {
+                _view.ShowError("Введите серию и номер паспорта");
+                return;
+            }
+
+            var passport = new Passport(_view.PassportInput);
+            var hash = _hashService.ComputeHash(passport);
+            var accessGranted = _repository.CheckAccess(hash);
+
+            _view.ShowResult(FormatResult(passport, accessGranted));
+        }
+        catch (ArgumentException exception)
+        {
+            _view.ShowError(exception.Message);
+        }
+        catch (SQLiteException exception) when (exception.ErrorCode == 1)
+        {
+            _view.ShowError("Файл базы данных не найден");
+        }
+        catch (Exception exception)
+        {
+            _view.ShowError($"Ошибка: {exception.Message}");
+        }
+    }
+
+    private string FormatResult(Passport passport, bool accessGranted)
+    {
+        var status = accessGranted ? "ПРЕДОСТАВЛЕН" : "НЕ ПРЕДОСТАВЛЯЛСЯ";
+        return $"По паспорту «{passport.Number}» доступ к бюллетеню {status}";
     }
 }
 
-private SQLiteConnection CreateConnection()
+public partial class MainForm : IPassportView
 {
-    var dbPath = Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), "db.sqlite");
+    private PassportPresenter _presenter;
 
-    return new SQLiteConnection($"Data Source={dbPath}");
-}
+    public MainForm()
+    {
+        _presenter = new PassportPresenter(this, new PassportValidator(), new PassportHashService(), new PassportRepository());
+    }
 
-private SQLiteCommand CreateCommand(SQLiteConnection connection, string passportData)
-{
-    var hash = Form.ComputeSha256Hash(passportData);
+    public string PassportInput => 
+        _txtPassport.Text;
 
-    return new SQLiteCommand($"select * from passports where num='{0}' limit 1;", connection);
-}
+    public void ShowResult(string message) =>
+        message;
 
-private DataTable ExecuteQuery(SQLiteCommand command)
-{
-    DataTable dataTable = new ();
-    new SQLiteDataAdapter(command).Fill(dataTable);
-    return dataTable;
-}
+    public void ShowError(string message) =>
+        MessageBox.Show(message);
 
-private string FormatResult(DataTable resultTable, string originalPassport)
-{
-    if (resultTable.Rows.Count == 0)
-        return $"Паспорт «{originalPassport}» в списке участников дистанционного голосования НЕ НАЙДЕН";
-
-    var accessGranted = Convert.ToBoolean(resultTable.Rows[0].ItemArray[1]);
-
-    var status = accessGranted ? "ПРЕДОСТАВЛЕН" : "НЕ ПРЕДОСТАВЛЯЛСЯ";
-
-    return $"По паспорту «{originalPassport}» доступ к бюллетеню на дистанционном электронном голосовании {status}";
-}
-
-private void HandleDatabaseException(SQLiteException exception)
-{
-    if (exception.ErrorCode == 1)
-        MessageBox.Show("Файл db.sqlite не найден. Положите файл в папку вместе с exe.");
+    private void CheckPassportHandler(object sender) => 
+        _presenter.CheckPassport();
 }
