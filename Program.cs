@@ -1,27 +1,19 @@
 public class Passport
 {
-    public string Number { get; }
-
     public Passport(string rawData)
     {
-        var cleaned = rawData?.Trim().Replace(" ", "") ?? "";
+        string cleaned = rawData?.Trim().Replace(" ", "") ?? "";
 
-        if (cleaned.Length < 10)
-            throw new ArgumentException("Неверный формат паспорта");
+        if (string.IsNullOrWhiteSpace(cleaned))
+            throw new ArgumentException("Введите серию и номер паспорта");
+
+        if (cleaned.Length != 10 || cleaned.All(char.IsDigit) == false)
+            throw new ArgumentException("Неверный формат паспорта. Требуется 10 цифр");
 
         Number = cleaned;
     }
-}
 
-public interface IPassportValidator
-{
-    bool Validate(string input);
-}
-
-public class PassportValidator : IPassportValidator
-{
-    public bool Validate(string input) => 
-        string.IsNullOrWhiteSpace(input) == false;
+    public string Number { get; }
 }
 
 public class PassportHashService
@@ -38,16 +30,21 @@ public class PassportRepository
 {
     private const string Hash = "@hash";
 
-    public bool CheckAccess(string hash)
+    public bool? CheckAccess(string hash)
     {
-        SQLiteConnection connection = new SQLiteConnection(GetConnectionString());
+        using var connection = new SQLiteConnection(GetConnectionString());
 
         connection.Open();
 
-        SQLiteCommand command = new SQLiteCommand($"SELECT access_granted FROM passports WHERE hash = {Hash} LIMIT 1",connection);
+        using var command = new SQLiteCommand(
+            $"SELECT access_granted FROM passports WHERE hash = {Hash} LIMIT 1",
+            connection);
 
         command.Parameters.AddWithValue(Hash, hash);
-        return Convert.ToBoolean(command.ExecuteScalar());
+
+        var result = command.ExecuteScalar();
+
+        return result != null ? (bool?)Convert.ToBoolean(result) : null;
     }
 
     private string GetConnectionString() =>
@@ -64,14 +61,12 @@ public interface IPassportView
 public class PassportPresenter
 {
     private readonly IPassportView _view;
-    private readonly IPassportValidator _validator;
     private readonly PassportHashService _hashService;
     private readonly PassportRepository _repository;
 
-    public PassportPresenter(IPassportView view, IPassportValidator validator, PassportHashService hashService, PassportRepository repository)
+    public PassportPresenter(IPassportView view, PassportHashService hashService, PassportRepository repository)
     {
         _view = view;
-        _validator = validator;
         _hashService = hashService;
         _repository = repository;
     }
@@ -80,15 +75,9 @@ public class PassportPresenter
     {
         try
         {
-            if (_validator.Validate(_view.PassportInput) == false)
-            {
-                _view.ShowError("Введите серию и номер паспорта");
-                return;
-            }
-
-            var passport = new Passport(_view.PassportInput);
-            var hash = _hashService.ComputeHash(passport);
-            var accessGranted = _repository.CheckAccess(hash);
+            Passport passport = new Passport(_view.PassportInput);
+            string hash = _hashService.ComputeHash(passport);
+            bool accessGranted = _repository.CheckAccess(hash);
 
             _view.ShowResult(FormatResult(passport, accessGranted));
         }
@@ -108,7 +97,7 @@ public class PassportPresenter
 
     private string FormatResult(Passport passport, bool accessGranted)
     {
-        var status = accessGranted ? "ПРЕДОСТАВЛЕН" : "НЕ ПРЕДОСТАВЛЯЛСЯ";
+        string status = accessGranted ? "ПРЕДОСТАВЛЕН" : "НЕ ПРЕДОСТАВЛЯЛСЯ";
         return $"По паспорту «{passport.Number}» доступ к бюллетеню {status}";
     }
 }
@@ -119,18 +108,24 @@ public partial class MainForm : IPassportView
 
     public MainForm()
     {
-        _presenter = new PassportPresenter(this, new PassportValidator(), new PassportHashService(), new PassportRepository());
+        _presenter = new PassportPresenter(this,new PassportHashService(),new PassportRepository());
     }
 
-    public string PassportInput => 
-        _txtPassport.Text;
+    public string PassportInput => passportTextBox.Text;
 
-    public void ShowResult(string message) =>
-        message;
+    public void ShowResult(string message)
+    {
+        resultLabel.Text = message;
+        resultLabel.Visible = true;
+    }
 
-    public void ShowError(string message) =>
-        MessageBox.Show(message);
+    public void ShowError(string message)
+    {
+        MessageBox.Show(message, "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+    }
 
-    private void CheckPassportHandler(object sender) => 
+    private void CheckButtonClick()
+    {
         _presenter.CheckPassport();
+    }
 }
